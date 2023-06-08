@@ -435,6 +435,8 @@ func testServerWithSnapshotsEnabled(t *testing.T, serverURL string, enabled bool
 				w.Header().Set("x-terraform-snapshot-interval", "300")
 			}
 			w.WriteHeader(http.StatusOK)
+		case "PUT":
+			t.Log("pretending to be Archivist")
 		default:
 			t.Fatal("don't know what API operation this was supposed to be")
 		}

@@ -115,7 +115,7 @@ func TestState(t *testing.T) {
 	}
 }`)
 
-	if err := state.uploadState(state.lineage, state.serial, state.forcePush, data, jsonState, jsonStateOutputs); err != nil {
+	if err := state.uploadStateFallback(context.Background(), state.lineage, state.serial, state.forcePush, data, jsonState, jsonStateOutputs); err != nil {
 		t.Fatalf("put: %s", err)
 	}
 

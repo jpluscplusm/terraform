@@ -1254,14 +1254,18 @@ func (m *MockStateVersions) Create(ctx context.Context, workspaceID string, opti
 	sv := &tfe.StateVersion{
 		ID:          id,
 		DownloadURL: url,
+		UploadURL:   fmt.Sprintf("/_archivist/upload/%s", id),
 		Serial:      *options.Serial,
+	}
+
+	if options.State == nil {
+		return nil, errors.New("params are missing")
 	}
 
 	state, err := base64.StdEncoding.DecodeString(*options.State)
 	if err != nil {
 		return nil, err
 	}
-
 	m.states[sv.DownloadURL] = state
 	m.outputStates[sv.ID] = []byte(*options.JSONStateOutputs)
 	m.stateVersions[sv.ID] = sv

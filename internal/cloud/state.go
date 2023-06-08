@@ -19,6 +19,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/gocty"
 
@@ -262,6 +264,43 @@ func (s *State) ShouldPersistIntermediateState(info *local.IntermediateStatePers
 	return currentInterval >= wantInterval
 }
 
+func (s *State) tfePutURL(ctx context.Context, url string, data []byte) error {
+	reader := bytes.NewReader(data)
+	req, err := s.tfeClient.NewRequest("PUT", url, reader)
+	if err != nil {
+		return err
+	}
+
+	return req.Do(ctx, nil)
+}
+
+func (s *State) uploadStateFallback(ctx context.Context, lineage string, serial uint64, isForcePush bool, state, jsonState, jsonStateOutputs []byte) error {
+	options := tfe.StateVersionCreateOptions{
+		Lineage:          tfe.String(lineage),
+		Serial:           tfe.Int64(int64(serial)),
+		MD5:              tfe.String(fmt.Sprintf("%x", md5.Sum(state))),
+		Force:            tfe.Bool(isForcePush),
+		State:            tfe.String(base64.StdEncoding.EncodeToString(state)),
+		JSONState:        tfe.String(base64.StdEncoding.EncodeToString(jsonState)),
+		JSONStateOutputs: tfe.String(base64.StdEncoding.EncodeToString(jsonStateOutputs)),
+	}
+
+	// If we have a run ID, make sure to add it to the options
+	// so the state will be properly associated with the run.
+	runID := os.Getenv("TFE_RUN_ID")
+	if runID != "" {
+		options.Run = &tfe.Run{ID: runID}
+	}
+
+	// Create the new state.
+	_, err := s.tfeClient.StateVersions.Create(ctx, s.workspace.ID, options)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func (s *State) uploadState(lineage string, serial uint64, isForcePush bool, state, jsonState, jsonStateOutputs []byte) error {
 	ctx := context.Background()
 
@@ -269,9 +308,7 @@ func (s *State) uploadState(lineage string, serial uint64, isForcePush bool, sta
 		Lineage:          tfe.String(lineage),
 		Serial:           tfe.Int64(int64(serial)),
 		MD5:              tfe.String(fmt.Sprintf("%x", md5.Sum(state))),
-		State:            tfe.String(base64.StdEncoding.EncodeToString(state)),
 		Force:            tfe.Bool(isForcePush),
-		JSONState:        tfe.String(base64.StdEncoding.EncodeToString(jsonState)),
 		JSONStateOutputs: tfe.String(base64.StdEncoding.EncodeToString(jsonStateOutputs)),
 	}
 
@@ -288,8 +325,24 @@ func (s *State) uploadState(lineage string, serial uint64, isForcePush bool, sta
 	ctx = tfe.ContextWithResponseHeaderHook(ctx, s.readSnapshotIntervalHeader)
 
 	// Create the new state.
-	_, err := s.tfeClient.StateVersions.Create(ctx, s.workspace.ID, options)
-	return err
+	sv, err := s.tfeClient.StateVersions.Create(ctx, s.workspace.ID, options)
+	if err != nil && strings.Contains(err.Error(), "params are missing") {
+		// Create the new state with content included in the request (Terraform Enterprise v202306-1 and below)
+		log.Printf("[WARN] Trying compatibility state upload")
+		return s.uploadStateFallback(ctx, lineage, serial, isForcePush, state, jsonState, jsonStateOutputs)
+	} else if err != nil {
+		return err
+	}
+
+	g, ctx := errgroup.WithContext(context.Background())
+	g.Go(func() error {
+		return s.tfePutURL(ctx, sv.UploadURL, state)
+	})
+	g.Go(func() error {
+		return s.tfePutURL(ctx, sv.JSONUploadURL, jsonState)
+	})
+
+	return g.Wait()
 }
 
 // Lock calls the Client's Lock method if it's implemented.
